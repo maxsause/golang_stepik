@@ -25,8 +25,10 @@ func ExecutePipeline(jobs ...job) {
 }
 
 func SingleHash(in, out chan interface{}) {
-	var wgsh sync.WaitGroup
-	var md5Mutex sync.Mutex
+	var (
+		wgsh     sync.WaitGroup
+		md5Mutex sync.Mutex
+	)
 
 	for dataRaw := range in {
 		data := strconv.Itoa(dataRaw.(int))
@@ -39,9 +41,11 @@ func SingleHash(in, out chan interface{}) {
 }
 
 func calculationSingleHash(data string, out chan interface{}, md5Mutex *sync.Mutex) {
-	var wgshd sync.WaitGroup
-	var crcData string
-	var crcMd5Data string
+	var (
+		wgshd      sync.WaitGroup
+		crcData    string
+		crcMd5Data string
+	)
 
 	wgshd.Go(func() {
 		crcData = DataSignerCrc32(data)
@@ -75,7 +79,6 @@ func calculationMultiHash(data string, out chan interface{}) {
 	var wgmhd sync.WaitGroup
 	results := make([]string, 6)
 	for th := 0; th < 6; th++ {
-		th := th
 		wgmhd.Go(func() {
 			crcData := DataSignerCrc32(strconv.Itoa(th) + data)
 			results[th] = crcData
