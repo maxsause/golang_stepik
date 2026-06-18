@@ -42,9 +42,8 @@ func SingleHash(in, out chan interface{}) {
 
 func calculationSingleHash(data string, out chan interface{}, md5Mutex *sync.Mutex) {
 	var (
-		wgshd      sync.WaitGroup
-		crcData    string
-		crcMd5Data string
+		wgshd               sync.WaitGroup
+		crcData, crcMd5Data string
 	)
 
 	wgshd.Go(func() {
