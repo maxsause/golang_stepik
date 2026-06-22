@@ -16,6 +16,7 @@ func FastSearch(out io.Writer) {
 	if err != nil {
 		panic(err)
 	}
+	defer file.Close()
 
 	fileContents, err := ioutil.ReadAll(file)
 	if err != nil {
@@ -39,8 +40,7 @@ func FastSearch(out io.Writer) {
 			panic(err)
 		}
 
-		isAndroid := false
-		isMSIE := false
+		var isAndroid, isMSIE bool
 
 		for _, browser := range user.Browsers {
 			/// strings.Contains() вместо regexp.MatchString()
@@ -70,7 +70,8 @@ func FastSearch(out io.Writer) {
 			continue
 		}
 		email := r.ReplaceAllString(user.Email, " [at] ")
-		fmt.Fprintf(&foundUsers, "[%d] %s <%s>\n", i, user.Name, email)
+		foundUsers.WriteString(fmt.Sprintf("[%d] %s <%s>\n", i, user.Name, email))
+
 	}
 
 	fmt.Fprintln(out, "found users:\n"+foundUsers.String())
