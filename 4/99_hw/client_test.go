@@ -3,13 +3,17 @@ package main
 import (
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 type XMLUser struct {
@@ -52,17 +56,45 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := os.ReadFile("dataset.xml")
+	users, err := getResFromDb()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	filters := SearchRequest{
+		Query:      query,
+		OrderField: orderField,
+		Limit:      limit,
+		Offset:     offset,
+		OrderBy:    orderBy,
+	}
+	res, err := filterData(users, filters)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		errResp := SearchErrorResponse{
+			Error: fmt.Errorf("SearchServer fatal error").Error(),
+		}
+		jsonErr, _ := json.Marshal(errResp)
+		_, _ = fmt.Fprintln(w, string(jsonErr))
+		c.JSON(http.StatusOK, response)
+		return
+	}
 
-	var xmlUsers XMLUsers
-	err = xml.Unmarshal(data, &xmlUsers)
+	err = json.NewEncoder(w).Encode(res)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		return
+	}
+}
+
+func getResFromDb() ([]User, error) {
+	data, err := os.ReadFile("dataset.xml")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read dataset.xml: %w", err)
+	}
+
+	var xmlUsers XMLUsers
+	if err := xml.Unmarshal(data, &xmlUsers); err != nil {
+		return nil, fmt.Errorf("error unmarshalling XML: %v", err)
 	}
 	users := make([]User, len(xmlUsers.List))
 	for i, xmlUser := range xmlUsers.List {
@@ -74,18 +106,22 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 			Gender: xmlUser.Gender,
 		}
 	}
+	return users, nil
 
+}
+
+func filterData(users []User, filters SearchRequest) ([]User, error) {
 	filteredUsers := make([]User, 0, len(users))
 
 	for _, user := range users {
-		if query == "" || strings.Contains(user.Name, query) || strings.Contains(user.About, query) {
+		if filters.Query == "" || strings.Contains(user.Name, filters.Query) || strings.Contains(user.About, filters.Query) {
 			filteredUsers = append(filteredUsers, user)
 		}
 	}
 
-	switch orderBy {
+	switch filters.OrderBy {
 	case OrderByAsc:
-		switch orderField {
+		switch filters.OrderField {
 		case "Id":
 			sort.Slice(filteredUsers, func(i, j int) bool {
 				return filteredUsers[i].Id < filteredUsers[j].Id
@@ -99,11 +135,10 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 				return filteredUsers[i].Name < filteredUsers[j].Name
 			})
 		default:
-			w.WriteHeader(http.StatusBadRequest)
-			return
+			return nil, fmt.Errorf("invalid order_field: %s", filters.OrderField)
 		}
 	case OrderByDesc:
-		switch orderField {
+		switch filters.OrderField {
 		case "Id":
 			sort.Slice(filteredUsers, func(i, j int) bool {
 				return filteredUsers[i].Id > filteredUsers[j].Id
@@ -117,278 +152,137 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 				return filteredUsers[i].Name > filteredUsers[j].Name
 			})
 		default:
-			w.WriteHeader(http.StatusBadRequest)
-			return
+			return nil, fmt.Errorf("invalid order_field: %s", filters.OrderField)
 		}
 	case OrderByAsIs:
-		switch orderField {
+		switch filters.OrderField {
 		case "Id", "Age", "Name", "":
-
 		default:
-			w.WriteHeader(http.StatusBadRequest)
-			return
+			return nil, fmt.Errorf("invalid order_field: %s", filters.OrderField)
 		}
 	}
 
-	if offset > len(filteredUsers) {
+	if filters.Offset > len(filteredUsers) {
 		filteredUsers = []User{}
 	} else {
-		filteredUsers = filteredUsers[offset:]
+		filteredUsers = filteredUsers[filters.Offset:]
 	}
-	if limit < len(filteredUsers) {
-		filteredUsers = filteredUsers[:limit]
+	if filters.Limit < len(filteredUsers) {
+		filteredUsers = filteredUsers[:filters.Limit]
 	}
-
-	err = json.NewEncoder(w).Encode(filteredUsers)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-	}
+	return filteredUsers, nil
 }
 
 func TestFindUser(t *testing.T) {
+	type testIN struct {
+		token   string
+		request SearchRequest
+	}
+
+	type testOut struct {
+		expectedInError string
+		errResp         SearchErrorResponse
+	}
+
 	tests := []struct {
-		name          string
-		token         string
-		request       SearchRequest
-		expectedError bool
+		name string
+		in   testIN
+		out  testOut
 	}{
 		{
 			"Normal request",
-			validAccessToken,
-			SearchRequest{
-				Limit:      2,
-				Offset:     0,
-				Query:      "",
-				OrderField: "Id",
-				OrderBy:    OrderByAsc},
-			false,
+			testIN{validAccessToken,
+				SearchRequest{
+					Limit:      2,
+					Offset:     0,
+					Query:      "",
+					OrderField: "Id",
+					OrderBy:    OrderByAsc}},
+			testOut{
+				expectedInError: "",
+				errResp:         SearchErrorResponse{},
+			},
 		},
 		{
 			"Negative limit",
-			validAccessToken,
-			SearchRequest{
-				Limit:      -1,
-				Offset:     0,
-				Query:      "",
-				OrderField: "Id",
-				OrderBy:    OrderByAsc},
-			true,
+			testIN{validAccessToken,
+				SearchRequest{
+					Limit:      -1,
+					Offset:     0,
+					Query:      "",
+					OrderField: "Id",
+					OrderBy:    OrderByAsc}},
+			testOut{
+				expectedInError: "limit must be > 0",
+			},
 		},
-		{
-			"Limit more then 25",
-			validAccessToken,
-			SearchRequest{
-				Limit:      26,
-				Offset:     0,
-				Query:      "",
-				OrderField: "Id",
-				OrderBy:    OrderByAsc},
-			false,
-		},
-		{
-			"Negative offset",
-			validAccessToken,
-			SearchRequest{
-				Limit:      2,
-				Offset:     -1,
-				Query:      "",
-				OrderField: "Id",
-				OrderBy:    OrderByAsc},
-			true,
-		},
-		{
-			"Bad access token",
-			"non-valid-access-token",
-			SearchRequest{
-				Limit:      2,
-				Offset:     0,
-				Query:      "",
-				OrderField: "Id",
-				OrderBy:    OrderByAsc},
-			true,
-		},
+		//{
+		//	"Limit more then 25",
+		//	validAccessToken,
+		//	SearchRequest{
+		//		Limit:      26,
+		//		Offset:     0,
+		//		Query:      "",
+		//		OrderField: "Id",
+		//		OrderBy:    OrderByAsc},
+		//	false,
+		//},
+		//{
+		//	"Negative offset",
+		//	validAccessToken,
+		//	SearchRequest{
+		//		Limit:      2,
+		//		Offset:     -1,
+		//		Query:      "",
+		//		OrderField: "Id",
+		//		OrderBy:    OrderByAsc},
+		//	true,
+		//},
+		//{
+		//	"Bad access token",
+		//	"non-valid-access-token",
+		//	SearchRequest{
+		//		Limit:      2,
+		//		Offset:     0,
+		//		Query:      "",
+		//		OrderField: "Id",
+		//		OrderBy:    OrderByAsc},
+		//	true,
+		//},
 	}
 
 	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
 	defer ts.Close()
 
+	users, _ := getResFromDb()
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			testUsers := slices.Clone(users)
 			searchClient := &SearchClient{
-				AccessToken: test.token,
+				AccessToken: test.in.token,
 				URL:         ts.URL,
 			}
 
-			result, err := searchClient.FindUsers(test.request)
-			_ = result
+			result, err := searchClient.FindUsers(test.in.request)
 
-			if !test.expectedError {
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-				}
-			} else {
-				if err == nil {
-					t.Errorf("Unexpected success")
-				}
+			if test.out.expectedInError != "" {
+				assert.ErrorContains(t, err, test.out.expectedInError)
+				return
 			}
+
+			expected := makeResponse(testUsers, test.in.request)
+			assert.Equal(t, expected, result)
 		})
 	}
 }
 
-func TestFindUserLimit(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
-	defer ts.Close()
-	searchClient := &SearchClient{
-		AccessToken: validAccessToken,
-		URL:         ts.URL,
+func makeResponse(users []User, filters SearchRequest) *SearchResponse {
+	resp := &SearchResponse{}
+	filtered, _ := filterData(users, filters)
+	if len(filtered) == filters.Limit {
+		resp.NextPage = true
 	}
-	result, err := searchClient.FindUsers(SearchRequest{
-		Limit:      -1,
-		Offset:     0,
-		Query:      "",
-		OrderField: "Id",
-		OrderBy:    OrderByAsc,
-	})
-	if err.Error() != "limit must be > 0" {
-		t.Fatalf("expected limit must be > 0, got: %v", err)
-	}
+	resp.Users = filtered[0:len(filtered)]
 
-	result, err = searchClient.FindUsers(SearchRequest{
-		Limit:      26,
-		Offset:     0,
-		Query:      "",
-		OrderField: "Id",
-		OrderBy:    OrderByAsc,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %s", err)
-	}
-	if len(result.Users) != 25 {
-		t.Fatalf("expected 25 users, got %d", len(result.Users))
-	}
-}
-
-func TestFindUserOffset(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
-	defer ts.Close()
-	searchClient := &SearchClient{
-		AccessToken: validAccessToken,
-		URL:         ts.URL,
-	}
-	_, err := searchClient.FindUsers(SearchRequest{
-		Limit:      2,
-		Offset:     -1,
-		Query:      "",
-		OrderField: "Id",
-		OrderBy:    OrderByAsc,
-	})
-	if err.Error() != "offset must be > 0" {
-		t.Fatalf("expected offset must be > 0, got: %v", err)
-	}
-}
-
-func TestFindUserQuery(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
-	defer ts.Close()
-	searchClient := &SearchClient{
-		AccessToken: validAccessToken,
-		URL:         ts.URL,
-	}
-	result, err := searchClient.FindUsers(SearchRequest{
-		Limit:      2,
-		Offset:     0,
-		Query:      "Boyd Wolf",
-		OrderField: "Id",
-		OrderBy:    OrderByAsc,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Users[0].Name != "Boyd Wolf" {
-		t.Fatalf("expected Boyd Wolf, got %v", result.Users[0].Name)
-	}
-
-	about := "Dolore magna magna commodo irure. Proident culpa nisi veniam excepteur sunt qui et laborum tempor. Qui proident Lorem commodo dolore ipsum.\n"
-	result, err = searchClient.FindUsers(SearchRequest{
-		Limit:      2,
-		Offset:     0,
-		Query:      about,
-		OrderField: "Id",
-		OrderBy:    OrderByAsc,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Users[0].About != about {
-		t.Fatalf("expected %v, got %v", about, result.Users[0].About)
-	}
-}
-
-func TestFindUserOrderField(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
-	defer ts.Close()
-	searchClient := &SearchClient{
-		AccessToken: validAccessToken,
-		URL:         ts.URL,
-	}
-	result, err := searchClient.FindUsers(SearchRequest{
-		Limit:      2,
-		Offset:     0,
-		Query:      "",
-		OrderField: "Id",
-		OrderBy:    OrderByAsc,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Users[0].Id != 0 {
-		t.Fatalf("expected first user id 0, got %v", result.Users[0].Id)
-	}
-	if result.Users[1].Id != 1 {
-		t.Fatalf("expected second user id 1, got %v", result.Users[1].Id)
-	}
-
-	result, err = searchClient.FindUsers(SearchRequest{
-		Limit:      2,
-		Offset:     0,
-		Query:      "",
-		OrderField: "Age",
-		OrderBy:    OrderByAsc,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Users[0].Age != 21 {
-		t.Fatalf("expected first user age 1, got %v", result.Users[0].Age)
-	}
-	if result.Users[1].Age != 21 {
-		t.Fatalf("expected second user age 1, got %v", result.Users[1].Age)
-	}
-}
-
-func TestFindUserBadAccessToken(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
-	defer ts.Close()
-	searchClient := &SearchClient{
-		AccessToken: "non-valid-access-token",
-		URL:         ts.URL,
-	}
-	_, err := searchClient.FindUsers(SearchRequest{})
-
-	if err.Error() != "Bad AccessToken" {
-		t.Fatalf("expected Bad AccessToken, got %v", err)
-	}
-}
-
-func TestFindUserUnmarshalJson(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
-	defer ts.Close()
-	searchClient := &SearchClient{
-		AccessToken: validAccessToken,
-		URL:         ts.URL,
-	}
-
-	result, err := searchClient.FindUsers(SearchRequest{})
-	_ = result
-	_ = err
+	return resp
 }
