@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -55,38 +56,37 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-
-	users, err := getResFromDb()
+	users, err := getDataFromDb()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+
 	filters := SearchRequest{
-		Query:      query,
-		OrderField: orderField,
 		Limit:      limit,
 		Offset:     offset,
+		Query:      query,
+		OrderField: orderField,
 		OrderBy:    orderBy,
 	}
-	res, err := filterData(users, filters)
+	filteredData, err := filterData(users, filters)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		errResp := SearchErrorResponse{
-			Error: fmt.Errorf("SearchServer fatal error").Error(),
+			Error: err.Error(),
 		}
 		jsonErr, _ := json.Marshal(errResp)
 		_, _ = fmt.Fprintln(w, string(jsonErr))
-		c.JSON(http.StatusOK, response)
 		return
 	}
 
-	err = json.NewEncoder(w).Encode(res)
+	err = json.NewEncoder(w).Encode(filteredData)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
 
-func getResFromDb() ([]User, error) {
+func getDataFromDb() ([]User, error) {
 	data, err := os.ReadFile("dataset.xml")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read dataset.xml: %w", err)
@@ -107,7 +107,6 @@ func getResFromDb() ([]User, error) {
 		}
 	}
 	return users, nil
-
 }
 
 func filterData(users []User, filters SearchRequest) ([]User, error) {
@@ -119,47 +118,12 @@ func filterData(users []User, filters SearchRequest) ([]User, error) {
 		}
 	}
 
-	switch filters.OrderBy {
-	case OrderByAsc:
-		switch filters.OrderField {
-		case "Id":
-			sort.Slice(filteredUsers, func(i, j int) bool {
-				return filteredUsers[i].Id < filteredUsers[j].Id
-			})
-		case "Age":
-			sort.Slice(filteredUsers, func(i, j int) bool {
-				return filteredUsers[i].Age < filteredUsers[j].Age
-			})
-		case "", "Name":
-			sort.Slice(filteredUsers, func(i, j int) bool {
-				return filteredUsers[i].Name < filteredUsers[j].Name
-			})
-		default:
-			return nil, fmt.Errorf("invalid order_field: %s", filters.OrderField)
+	if filters.OrderBy != OrderByAsIs {
+		sortFunc, err := makeSortFunc(filteredUsers, filters.OrderField, filters.OrderBy)
+		if err != nil {
+			return nil, err
 		}
-	case OrderByDesc:
-		switch filters.OrderField {
-		case "Id":
-			sort.Slice(filteredUsers, func(i, j int) bool {
-				return filteredUsers[i].Id > filteredUsers[j].Id
-			})
-		case "Age":
-			sort.Slice(filteredUsers, func(i, j int) bool {
-				return filteredUsers[i].Age > filteredUsers[j].Age
-			})
-		case "", "Name":
-			sort.Slice(filteredUsers, func(i, j int) bool {
-				return filteredUsers[i].Name > filteredUsers[j].Name
-			})
-		default:
-			return nil, fmt.Errorf("invalid order_field: %s", filters.OrderField)
-		}
-	case OrderByAsIs:
-		switch filters.OrderField {
-		case "Id", "Age", "Name", "":
-		default:
-			return nil, fmt.Errorf("invalid order_field: %s", filters.OrderField)
-		}
+		sort.Slice(filteredUsers, sortFunc)
 	}
 
 	if filters.Offset > len(filteredUsers) {
@@ -173,89 +137,160 @@ func filterData(users []User, filters SearchRequest) ([]User, error) {
 	return filteredUsers, nil
 }
 
+func makeSortFunc(users []User, orderField string, orderBy int) (func(i, j int) bool, error) {
+	switch orderField {
+	case "Id":
+		return func(i, j int) bool {
+			if orderBy == OrderByAsc {
+				return users[i].Id < users[j].Id
+			}
+			return users[i].Id > users[j].Id
+		}, nil
+	case "Age":
+		return func(i, j int) bool {
+			if orderBy == OrderByAsc {
+				return users[i].Age < users[j].Age
+			}
+			return users[i].Age > users[j].Age
+		}, nil
+	case "", "Name":
+		return func(i, j int) bool {
+			if orderBy == OrderByAsc {
+				return users[i].Name < users[j].Name
+			}
+			return users[i].Name > users[j].Name
+		}, nil
+	default:
+		return nil, fmt.Errorf("ErrorBadOrderField")
+	}
+}
+
+func makeResponse(users []User, filters SearchRequest) *SearchResponse {
+	resp := &SearchResponse{}
+	if filters.Limit > 25 {
+		filters.Limit = 25
+	}
+
+	filtered, _ := filterData(users, filters)
+	if len(filtered) == filters.Limit {
+		resp.NextPage = true
+	}
+	resp.Users = filtered[0:]
+
+	return resp
+}
+
 func TestFindUser(t *testing.T) {
-	type testIN struct {
+	type testIn struct {
 		token   string
 		request SearchRequest
 	}
 
 	type testOut struct {
-		expectedInError string
-		errResp         SearchErrorResponse
+		expectedError string
+		errResp       SearchErrorResponse
 	}
 
 	tests := []struct {
 		name string
-		in   testIN
+		in   testIn
 		out  testOut
 	}{
 		{
 			"Normal request",
-			testIN{validAccessToken,
+			testIn{
+				validAccessToken,
 				SearchRequest{
-					Limit:      2,
-					Offset:     0,
-					Query:      "",
+					Limit:      5,
+					Offset:     1,
+					Query:      "Boyd Wolf",
 					OrderField: "Id",
-					OrderBy:    OrderByAsc}},
+					OrderBy:    OrderByDesc},
+			},
 			testOut{
-				expectedInError: "",
-				errResp:         SearchErrorResponse{},
+				expectedError: "",
+				errResp:       SearchErrorResponse{},
 			},
 		},
 		{
 			"Negative limit",
-			testIN{validAccessToken,
+			testIn{
+				validAccessToken,
 				SearchRequest{
 					Limit:      -1,
 					Offset:     0,
 					Query:      "",
 					OrderField: "Id",
-					OrderBy:    OrderByAsc}},
+					OrderBy:    OrderByAsc},
+			},
 			testOut{
-				expectedInError: "limit must be > 0",
+				expectedError: "limit must be > 0",
 			},
 		},
-		//{
-		//	"Limit more then 25",
-		//	validAccessToken,
-		//	SearchRequest{
-		//		Limit:      26,
-		//		Offset:     0,
-		//		Query:      "",
-		//		OrderField: "Id",
-		//		OrderBy:    OrderByAsc},
-		//	false,
-		//},
-		//{
-		//	"Negative offset",
-		//	validAccessToken,
-		//	SearchRequest{
-		//		Limit:      2,
-		//		Offset:     -1,
-		//		Query:      "",
-		//		OrderField: "Id",
-		//		OrderBy:    OrderByAsc},
-		//	true,
-		//},
-		//{
-		//	"Bad access token",
-		//	"non-valid-access-token",
-		//	SearchRequest{
-		//		Limit:      2,
-		//		Offset:     0,
-		//		Query:      "",
-		//		OrderField: "Id",
-		//		OrderBy:    OrderByAsc},
-		//	true,
-		//},
+		{
+			"Limit more than 25",
+			testIn{
+				validAccessToken,
+				SearchRequest{
+					Limit:      26,
+					Offset:     0,
+					Query:      "",
+					OrderField: "Id",
+					OrderBy:    OrderByAsc,
+				},
+			},
+			testOut{
+				expectedError: "",
+				errResp:       SearchErrorResponse{},
+			},
+		},
+		{
+			"Negative offset",
+			testIn{
+				validAccessToken,
+				SearchRequest{
+					Limit:      2,
+					Offset:     -1,
+					Query:      "",
+					OrderField: "Id",
+					OrderBy:    OrderByAsc},
+			},
+			testOut{
+				expectedError: "offset must be > 0",
+			},
+		},
+		{
+			"Bad order field",
+			testIn{
+				validAccessToken,
+				SearchRequest{
+					Limit:      2,
+					Offset:     0,
+					Query:      "",
+					OrderField: "Bad",
+					OrderBy:    OrderByAsc},
+			},
+			testOut{
+				expectedError: "OrderFeld Bad invalid",
+			},
+		},
+		{
+			"Bad access token",
+			testIn{
+				"non-valid-token",
+				SearchRequest{},
+			},
+			testOut{
+				expectedError: "Bad AccessToken",
+			},
+		},
 	}
 
 	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
 	defer ts.Close()
-
-	users, _ := getResFromDb()
+	users, _ := getDataFromDb()
 	for _, test := range tests {
+
 		t.Run(test.name, func(t *testing.T) {
 			testUsers := slices.Clone(users)
 			searchClient := &SearchClient{
@@ -265,8 +300,8 @@ func TestFindUser(t *testing.T) {
 
 			result, err := searchClient.FindUsers(test.in.request)
 
-			if test.out.expectedInError != "" {
-				assert.ErrorContains(t, err, test.out.expectedInError)
+			if test.out.expectedError != "" {
+				assert.ErrorContains(t, err, test.out.expectedError)
 				return
 			}
 
@@ -276,13 +311,98 @@ func TestFindUser(t *testing.T) {
 	}
 }
 
-func makeResponse(users []User, filters SearchRequest) *SearchResponse {
-	resp := &SearchResponse{}
-	filtered, _ := filterData(users, filters)
-	if len(filtered) == filters.Limit {
-		resp.NextPage = true
+func TestFindUsersBadJson(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintln(w, "not json")
+	}))
+	defer ts.Close()
+	searchClient := &SearchClient{
+		AccessToken: validAccessToken,
+		URL:         ts.URL,
 	}
-	resp.Users = filtered[0:len(filtered)]
+	_, err := searchClient.FindUsers(SearchRequest{
+		Limit:      2,
+		Offset:     0,
+		Query:      "",
+		OrderField: "Id",
+		OrderBy:    OrderByAsc,
+	})
+	assert.ErrorContains(t, err, "cant unpack error json")
+}
 
-	return resp
+func TestFindUsersTimeout(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1 * time.Second)
+		_, _ = fmt.Fprintln(w, "timeout")
+	}))
+	defer ts.Close()
+	searchClient := &SearchClient{
+		AccessToken: validAccessToken,
+		URL:         ts.URL,
+	}
+	_, err := searchClient.FindUsers(SearchRequest{})
+	assert.ErrorContains(t, err, "timeout for")
+}
+
+func TestFindUsersUnknownError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintln(w, `{"error": "bad request"}`)
+	}))
+	searchClient := &SearchClient{
+		AccessToken: validAccessToken,
+		URL:         ts.URL,
+	}
+	ts.Close()
+	_, err := searchClient.FindUsers(SearchRequest{
+		Limit:      2,
+		Offset:     0,
+		Query:      "",
+		OrderField: "Id",
+		OrderBy:    OrderByAsc,
+	})
+	assert.ErrorContains(t, err, "unknown error")
+}
+
+func TestFindUsersInternalServerError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprintln(w, "error")
+	}))
+	defer ts.Close()
+	searchClient := &SearchClient{
+		AccessToken: validAccessToken,
+		URL:         ts.URL,
+	}
+	_, err := searchClient.FindUsers(SearchRequest{})
+	assert.ErrorContains(t, err, "SearchServer fatal error")
+}
+
+func TestFindUsersBadRequest(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintln(w, `{"error": "bad request"}`)
+	}))
+	defer ts.Close()
+	searchClient := &SearchClient{
+		AccessToken: validAccessToken,
+		URL:         ts.URL,
+	}
+	_, err := searchClient.FindUsers(SearchRequest{})
+	assert.ErrorContains(t, err, "unknown bad request error: bad request")
+}
+
+func TestFindUsersUnpackJsonError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintln(w, `{"error": "bad request"}`)
+	}))
+	defer ts.Close()
+	searchClient := &SearchClient{
+		AccessToken: validAccessToken,
+		URL:         ts.URL,
+	}
+	_, err := searchClient.FindUsers(SearchRequest{})
+	assert.ErrorContains(t, err, "cant unpack result json:")
 }
