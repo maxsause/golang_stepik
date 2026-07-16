@@ -43,17 +43,29 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 	orderField := r.FormValue("order_field")
 	limit, err := strconv.Atoi(r.FormValue("limit"))
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(SearchErrorResponse{
+			Error: "invalid limit",
+		})
 		return
 	}
 	offset, err := strconv.Atoi(r.FormValue("offset"))
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(SearchErrorResponse{
+			Error: "invalid offset",
+		})
 		return
 	}
 	orderBy, err := strconv.Atoi(r.FormValue("order_by"))
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(SearchErrorResponse{
+			Error: "invalid order_by",
+		})
 		return
 	}
 	users, err := getDataFromDb()
@@ -71,12 +83,11 @@ func SearchServer(w http.ResponseWriter, r *http.Request) {
 	}
 	filteredData, err := filterData(users, filters)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		errResp := SearchErrorResponse{
+		_ = json.NewEncoder(w).Encode(SearchErrorResponse{
 			Error: err.Error(),
-		}
-		jsonErr, _ := json.Marshal(errResp)
-		_, _ = fmt.Fprintln(w, string(jsonErr))
+		})
 		return
 	}
 
