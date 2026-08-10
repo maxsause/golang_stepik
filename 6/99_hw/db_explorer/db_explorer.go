@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/gorilla/mux"
 )
 
 type handler struct {
@@ -16,8 +14,61 @@ type handler struct {
 	Tables []string
 }
 
+type Column struct {
+	Name          string
+	Type          string
+	Nullable      bool
+	PrimaryKey    bool
+	AutoIncrement bool
+}
+
+type ListTablesResponse struct {
+	Response TablesResponse `json:"response"`
+}
+
+type TablesResponse struct {
+	Tables []string `json:"tables"`
+}
+
+type ListRecordsResponse struct {
+	Response RecordsResponse `json:"response"`
+}
+
+type RecordsResponse struct {
+	Records []map[string]interface{} `json:"records"`
+}
+
+type GetRecordResponse struct {
+	Response RecordResponse `json:"response"`
+}
+
+type RecordResponse struct {
+	Record map[string]interface{} `json:"record"`
+}
+
+type AddResponse struct {
+	Response map[string]int64 `json:"response"`
+}
+
+type UpdatedResponse struct {
+	Response UpdateResponse `json:"response"`
+}
+
+type UpdateResponse struct {
+	Update int64 `json:"updated"`
+}
+
+type DeletedResponse struct {
+	Response DeleteResponse `json:"response"`
+}
+
+type DeleteResponse struct {
+	Delete int64 `json:"deleted"`
+}
+
 func NewDbExplorer(db *sql.DB) (http.Handler, error) {
-	r := mux.NewRouter()
+	r := http.NewServeMux()
+
 	tables, err := checkTables(db)
 	if err != nil {
 		return nil, err
@@ -28,43 +79,32 @@ func NewDbExplorer(db *sql.DB) (http.Handler, error) {
 		Tables: tables,
 	}
 
-	r.HandleFunc("/", h.List).Methods(http.MethodGet)
-	r.HandleFunc("/{table}", h.ListRecords).Methods(http.MethodGet)
-	r.HandleFunc("/{table}/{id}", h.GetRecord).Methods(http.MethodGet)
-	r.HandleFunc("/{table}/", h.Add).Methods(http.MethodPut)
-	r.HandleFunc("/{table}/{id}", h.Update).Methods(http.MethodPost)
-	r.HandleFunc("/{table}/{id}", h.Delete).Methods(http.MethodDelete)
+	r.HandleFunc("GET /", h.List)
+	r.HandleFunc("GET /{table}", h.checkTable(h.ListRecords))
+	r.HandleFunc("GET /{table}/{id}", h.checkTable(h.GetRecord))
+	r.HandleFunc("PUT /{table}/", h.checkTable(h.Add))
+	r.HandleFunc("POST /{table}/{id}", h.checkTable(h.Update))
+	r.HandleFunc("DELETE /{table}/{id}", h.checkTable(h.Delete))
 
 	return r, nil
 }
 
 func (h *handler) List(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	err := json.NewEncoder(w).Encode(map[string]interface{}{
-		"response": map[string]interface{}{
-			"tables": h.Tables,
+	resp := ListTablesResponse{
+		Response: TablesResponse{
+			Tables: h.Tables,
 		},
-	})
-	if err != nil {
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		err = fmt.Errorf("list: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 }
 
 func (h *handler) ListRecords(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	table := vars["table"]
-	if !containsTable(h.Tables, table) {
-		w.WriteHeader(http.StatusNotFound)
-		err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "unknown table",
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-		return
-	}
-
+	table := r.PathValue("table")
 	limit := 5
 	offset := 0
 
@@ -83,12 +123,15 @@ func (h *handler) ListRecords(w http.ResponseWriter, r *http.Request) {
 	query := fmt.Sprintf("SELECT * FROM %s LIMIT ? OFFSET ?", table)
 	rows, err := h.DB.Query(query, limit, offset)
 	if err != nil {
+		err = fmt.Errorf("list records: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer func() { _ = rows.Close() }()
 
 	columns, err := rows.Columns()
 	if err != nil {
+		err = fmt.Errorf("list records: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -102,7 +145,8 @@ func (h *handler) ListRecords(w http.ResponseWriter, r *http.Request) {
 			dest[i] = &values[i]
 		}
 
-		if err := rows.Scan(dest...); err != nil {
+		if err = rows.Scan(dest...); err != nil {
+			err = fmt.Errorf("list records: %w", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -118,18 +162,14 @@ func (h *handler) ListRecords(w http.ResponseWriter, r *http.Request) {
 		records = append(records, record)
 	}
 
-	if err = rows.Close(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(map[string]interface{}{
-		"response": map[string]interface{}{
-			"records": records,
+	resp := ListRecordsResponse{
+		Response: RecordsResponse{
+			Records: records,
 		},
-	})
-	if err != nil {
+	}
+	if err = json.NewEncoder(w).Encode(resp); err != nil {
+		err = fmt.Errorf("list records: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -137,51 +177,41 @@ func (h *handler) ListRecords(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) GetRecord(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	table := vars["table"]
-	if !containsTable(h.Tables, table) {
-		w.WriteHeader(http.StatusNotFound)
-		err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "unknown table",
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-		return
-	}
-
+	table := r.PathValue("table")
 	query := fmt.Sprintf("SELECT * FROM %s", table)
 	rows, err := h.DB.Query(query)
 	if err != nil {
+		err = fmt.Errorf("get record: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer func() { _ = rows.Close() }()
+
 	columns, err := rows.Columns()
 	if err != nil {
+		err = fmt.Errorf("get record: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err = rows.Close(); err != nil {
+		err = fmt.Errorf("get record: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	idName := columns[0]
-	id := vars["id"]
+	id := r.PathValue("id")
 
 	query = fmt.Sprintf("SELECT * FROM %s WHERE %s = ?", table, idName)
 	rows, err = h.DB.Query(query, id)
 	if err != nil {
+		err = fmt.Errorf("get record: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer func() { _ = rows.Close() }()
+
 	if !rows.Next() {
-		w.WriteHeader(http.StatusNotFound)
-		err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "record not found",
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		httpError(w, "record not found", http.StatusNotFound)
 		return
 	}
 
@@ -192,7 +222,8 @@ func (h *handler) GetRecord(w http.ResponseWriter, r *http.Request) {
 		dest[i] = &values[i]
 	}
 
-	if err := rows.Scan(dest...); err != nil {
+	if err = rows.Scan(dest...); err != nil {
+		err = fmt.Errorf("get record: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -206,64 +237,33 @@ func (h *handler) GetRecord(w http.ResponseWriter, r *http.Request) {
 		answer[columns[i]] = value
 	}
 
-	if err = rows.Close(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(map[string]interface{}{
-		"response": map[string]interface{}{
-			"record": answer,
+	resp := GetRecordResponse{
+		Response: RecordResponse{
+			Record: answer,
 		},
-	})
-	if err != nil {
+	}
+	if err = json.NewEncoder(w).Encode(resp); err != nil {
+		err = fmt.Errorf("get record: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 }
 
 func (h *handler) Add(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	table := vars["table"]
-	if !containsTable(h.Tables, table) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "unknown table",
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		return
-	}
-
+	table := r.PathValue("table")
 	data := make(map[string]interface{})
 	decoder := json.NewDecoder(r.Body)
 	decoder.UseNumber()
 
 	if err := decoder.Decode(&data); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "invalid json",
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		httpError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
-	query := fmt.Sprintf("SHOW FULL COLUMNS FROM %s", table)
-	rows, err := h.DB.Query(query)
+	columns, err := getTableColumns(h.DB, table)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	metaColumns, err := rows.Columns()
-	if err != nil {
+		err = fmt.Errorf("add: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -275,90 +275,39 @@ func (h *handler) Add(w http.ResponseWriter, r *http.Request) {
 		primaryKey   string
 	)
 
-	for rows.Next() {
-		raw := make([]interface{}, len(metaColumns))
-		dest := make([]interface{}, len(metaColumns))
-
-		for i := range raw {
-			dest[i] = &raw[i]
+	for _, column := range columns {
+		if column.PrimaryKey {
+			primaryKey = column.Name
 		}
 
-		if err := rows.Scan(dest...); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		meta := make(map[string]string)
-
-		for i, value := range raw {
-			if value == nil {
-				meta[metaColumns[i]] = ""
-				continue
-			}
-
-			if b, ok := value.([]byte); ok {
-				meta[metaColumns[i]] = string(b)
-				continue
-			}
-
-			meta[metaColumns[i]] = fmt.Sprint(value)
-		}
-
-		field := meta["Field"]
-		if meta["Key"] == "PRI" {
-			primaryKey = field
-		}
-		if strings.Contains(meta["Extra"], "auto_increment") {
+		if column.AutoIncrement {
 			continue
 		}
 
-		value, exists := data[field]
-		if !exists {
-			if meta["Null"] == "YES" {
-				value = nil
-			} else {
-				sqlType := strings.ToLower(meta["Type"])
+		value, exists := data[column.Name]
 
-				if strings.Contains(sqlType, "int") {
-					value = int64(0)
-				} else if strings.Contains(sqlType, "float") ||
-					strings.Contains(sqlType, "double") ||
-					strings.Contains(sqlType, "decimal") {
-					value = float64(0)
-				} else {
-					value = ""
-				}
-			}
+		if !exists {
+			value = defaultValue(column)
 		} else if value == nil {
-			if meta["Null"] != "YES" {
-				writeFieldError(w, field)
+			if !column.Nullable {
+				writeFieldError(w, column.Name)
 				return
 			}
 		} else {
-			convertedValue, ok := convertValue(meta["Type"], value)
+			convertedValue, ok := convertValue(column.Type, value)
 			if !ok {
-				writeFieldError(w, field)
+				writeFieldError(w, column.Name)
 				return
 			}
 			value = convertedValue
 		}
 
-		fields = append(fields, "`"+field+"`")
+		fields = append(fields, "`"+column.Name+"`")
 		placeholders = append(placeholders, "?")
 		values = append(values, value)
 	}
 
-	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if err = rows.Close(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	query = fmt.Sprintf(
+	query := fmt.Sprintf(
 		"INSERT INTO %s (%s) VALUES (%s)",
 		table,
 		strings.Join(fields, ", "),
@@ -367,45 +316,34 @@ func (h *handler) Add(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.DB.Exec(query, values...)
 	if err != nil {
+		err = fmt.Errorf("add: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	id, err := result.LastInsertId()
 	if err != nil {
+		err = fmt.Errorf("add: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(map[string]interface{}{
-		"response": map[string]interface{}{
+	resp := AddResponse{
+		Response: map[string]int64{
 			primaryKey: id,
 		},
-	})
-	if err != nil {
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err = json.NewEncoder(w).Encode(resp); err != nil {
+		err = fmt.Errorf("add: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 }
 
 func (h *handler) Update(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	table := vars["table"]
-	id := vars["id"]
-
-	if !containsTable(h.Tables, table) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "unknown table",
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		return
-	}
+	table := r.PathValue("table")
+	id := r.PathValue("id")
 
 	data := make(map[string]interface{})
 
@@ -413,73 +351,19 @@ func (h *handler) Update(w http.ResponseWriter, r *http.Request) {
 	decoder.UseNumber()
 
 	if err := decoder.Decode(&data); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpError(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
-	query := fmt.Sprintf("SHOW FULL COLUMNS FROM %s", table)
-
-	rows, err := h.DB.Query(query)
+	columns, err := getTableColumns(h.DB, table)
 	if err != nil {
+		err = fmt.Errorf("update: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	metaColumns, err := rows.Columns()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	tableColumns := make(map[string]map[string]string)
-	idName := ""
-
-	for rows.Next() {
-		values := make([]interface{}, len(metaColumns))
-		dest := make([]interface{}, len(metaColumns))
-
-		for i := range values {
-			dest[i] = &values[i]
-		}
-
-		if err := rows.Scan(dest...); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		column := make(map[string]string)
-
-		for i, value := range values {
-			if value == nil {
-				column[metaColumns[i]] = ""
-				continue
-			}
-
-			if b, ok := value.([]byte); ok {
-				column[metaColumns[i]] = string(b)
-				continue
-			}
-
-			column[metaColumns[i]] = fmt.Sprint(value)
-		}
-
-		tableColumns[column["Field"]] = column
-
-		if column["Key"] == "PRI" {
-			idName = column["Field"]
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	err = rows.Close()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	tableColumns := columnsByName(columns)
+	idName := primaryKey(columns)
 
 	fields := make([]string, 0)
 	values := make([]interface{}, 0)
@@ -490,140 +374,116 @@ func (h *handler) Update(w http.ResponseWriter, r *http.Request) {
 		if !exists {
 			continue
 		}
-		if field == idName {
+		if column.PrimaryKey {
 			writeFieldError(w, field)
 			return
 		}
 		if value == nil {
-			if column["Null"] != "YES" {
+			if !column.Nullable {
 				writeFieldError(w, field)
 				return
 			}
 		} else {
-			columnType := strings.ToLower(column["Type"])
-
-			if strings.Contains(columnType, "int") {
-				number, ok := value.(json.Number)
-				if !ok {
-					writeFieldError(w, field)
-					return
-				}
-
-				value, err = number.Int64()
-				if err != nil {
-					writeFieldError(w, field)
-					return
-				}
-			} else {
-				if _, ok := value.(string); !ok {
-					writeFieldError(w, field)
-					return
-				}
+			convertedValue, ok := convertValue(column.Type, value)
+			if !ok {
+				writeFieldError(w, field)
+				return
 			}
+
+			value = convertedValue
 		}
 
 		fields = append(fields, fmt.Sprintf("`%s` = ?", field))
 		values = append(values, value)
 	}
 
-	if len(fields) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"response": map[string]interface{}{
-				"updated": 0,
-			},
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-		return
-	}
-
 	values = append(values, id)
 
-	query = fmt.Sprintf(
+	query := fmt.Sprintf(
 		"UPDATE %s SET %s WHERE %s = ?",
 		table,
 		strings.Join(fields, ", "),
 		idName,
 	)
+
 	result, err := h.DB.Exec(query, values...)
 	if err != nil {
+		err = fmt.Errorf("update: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	updated, err := result.RowsAffected()
 	if err != nil {
+		err = fmt.Errorf("update: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(map[string]interface{}{
-		"response": map[string]interface{}{
-			"updated": updated,
+	resp := UpdatedResponse{
+		Response: UpdateResponse{
+			Update: updated,
 		},
-	})
-	if err != nil {
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if err = json.NewEncoder(w).Encode(resp); err != nil {
+		err = fmt.Errorf("update: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 }
 
 func (h *handler) Delete(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	table := vars["table"]
-	if !containsTable(h.Tables, table) {
-		w.WriteHeader(http.StatusNotFound)
-		err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "unknown table",
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-		return
-	}
+	table := r.PathValue("table")
 
 	query := fmt.Sprintf("SELECT * FROM %s", table)
 	rows, err := h.DB.Query(query)
 	if err != nil {
+		err = fmt.Errorf("delete: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer func() { _ = rows.Close() }()
+
 	columns, err := rows.Columns()
 	if err != nil {
+		err = fmt.Errorf("delete: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err = rows.Close(); err != nil {
+		err = fmt.Errorf("delete: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	idName := columns[0]
-	id := vars["id"]
+	id := r.PathValue("id")
 
 	query = fmt.Sprintf("DELETE FROM %s WHERE %s = ?", table, idName)
 
 	result, err := h.DB.Exec(query, id)
 	if err != nil {
+		err = fmt.Errorf("delete: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	deleted, err := result.RowsAffected()
 	if err != nil {
+		err = fmt.Errorf("delete: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-
-	err = json.NewEncoder(w).Encode(map[string]interface{}{
-		"response": map[string]interface{}{
-			"deleted": deleted,
+	resp := DeletedResponse{
+		Response: DeleteResponse{
+			Delete: deleted,
 		},
-	})
-	if err != nil {
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err = json.NewEncoder(w).Encode(resp); err != nil {
+		err = fmt.Errorf("delete: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -635,6 +495,7 @@ func checkTables(db *sql.DB) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 
 	var tables []string
 	for rows.Next() {
@@ -643,9 +504,6 @@ func checkTables(db *sql.DB) ([]string, error) {
 			return nil, err
 		}
 		tables = append(tables, table)
-	}
-	if err = rows.Close(); err != nil {
-		return nil, err
 	}
 	return tables, nil
 }
@@ -692,12 +550,126 @@ func convertValue(sqlType string, value interface{}) (interface{}, bool) {
 func writeFieldError(w http.ResponseWriter, field string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
-
 	err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"error": fmt.Sprintf("field %s have invalid type", field),
 	})
 	if err != nil {
+		err = fmt.Errorf("write field error: %w", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+}
+
+func httpError(w http.ResponseWriter, message string, statusCode int) {
+	w.WriteHeader(statusCode)
+	err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": message,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (h *handler) checkTable(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		table := r.PathValue("table")
+		if !containsTable(h.Tables, table) {
+			httpError(w, "unknown table", http.StatusNotFound)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func getTableColumns(db *sql.DB, table string) ([]Column, error) {
+	query := fmt.Sprintf("SHOW FULL COLUMNS FROM %s", table)
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var columns []Column
+
+	for rows.Next() {
+		var (
+			field      string
+			columnType string
+			collation  sql.NullString
+			nullable   string
+			key        string
+			defaultVal interface{}
+			extra      string
+			privileges string
+			comment    string
+		)
+
+		if err = rows.Scan(
+			&field,
+			&columnType,
+			&collation,
+			&nullable,
+			&key,
+			&defaultVal,
+			&extra,
+			&privileges,
+			&comment,
+		); err != nil {
+			return nil, err
+		}
+
+		columns = append(columns, Column{
+			Name:          field,
+			Type:          columnType,
+			Nullable:      nullable == "YES",
+			PrimaryKey:    key == "PRI",
+			AutoIncrement: strings.Contains(extra, "auto_increment"),
+		})
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return columns, nil
+}
+
+func defaultValue(column Column) interface{} {
+	if column.Nullable {
+		return nil
+	}
+
+	sqlType := strings.ToLower(column.Type)
+
+	switch {
+	case strings.Contains(sqlType, "int"):
+		return int64(0)
+
+	case strings.Contains(sqlType, "float"),
+		strings.Contains(sqlType, "double"),
+		strings.Contains(sqlType, "decimal"):
+		return float64(0)
+
+	default:
+		return ""
+	}
+}
+
+func columnsByName(columns []Column) map[string]Column {
+	result := make(map[string]Column, len(columns))
+
+	for _, column := range columns {
+		result[column.Name] = column
+	}
+	return result
+}
+
+func primaryKey(columns []Column) string {
+	for _, column := range columns {
+		if column.PrimaryKey {
+			return column.Name
+		}
+	}
+	return ""
 }
