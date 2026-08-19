@@ -209,15 +209,31 @@ func (s *server) broadcast(ev *Event) {
 	}
 	s.mutex.Unlock()
 
+	var wg sync.WaitGroup
+
 	for _, sub := range subs {
-		select {
+		wg.Add(1)
 
-		case <-sub.done:
-			continue
+		go func(sub *subscriber) {
+			defer wg.Done()
 
-		case sub.events <- ev:
-		}
+			timer := time.NewTimer(100 * time.Millisecond)
+			defer timer.Stop()
+
+			select {
+			case <-sub.done:
+				return
+
+			case sub.events <- ev:
+				return
+
+			case <-timer.C:
+				return
+			}
+		}(sub)
 	}
+
+	wg.Wait()
 }
 
 func (s *server) addStatSubscriber(sub *statSubscriber) {
@@ -234,21 +250,37 @@ func (s *server) removeStatSubscriber(sub *statSubscriber) {
 
 func (s *server) statBroadcast(ev *Event) {
 	s.statMutex.Lock()
-	subs := make([]*statSubscriber, 0, len(s.statSubscribers))
+	subs := make([]*statSubscriber, 0, len(s.subscribers))
 	for sub := range s.statSubscribers {
 		subs = append(subs, sub)
 	}
 	s.statMutex.Unlock()
 
+	var wg sync.WaitGroup
+
 	for _, sub := range subs {
-		select {
+		wg.Add(1)
 
-		case <-sub.done:
-			continue
+		go func(sub *statSubscriber) {
+			defer wg.Done()
 
-		case sub.events <- ev:
-		}
+			timer := time.NewTimer(100 * time.Millisecond)
+			defer timer.Stop()
+
+			select {
+			case <-sub.done:
+				return
+
+			case sub.events <- ev:
+				return
+
+			case <-timer.C:
+				return
+			}
+		}(sub)
 	}
+
+	wg.Wait()
 }
 
 func (s *server) Statistics(in *StatInterval, stream grpc.ServerStreamingServer[Stat]) error {
@@ -262,6 +294,9 @@ func (s *server) Statistics(in *StatInterval, stream grpc.ServerStreamingServer[
 	s.addStatSubscriber(sub)
 	defer s.removeStatSubscriber(sub)
 
+	if in.IntervalSeconds <= 0 {
+		return status.Error(codes.InvalidArgument, "interval must be > 0")
+	}
 	ticker := time.NewTicker(time.Duration(in.IntervalSeconds) * time.Second)
 	defer ticker.Stop()
 
