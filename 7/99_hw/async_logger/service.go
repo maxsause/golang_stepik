@@ -114,8 +114,8 @@ func (s *server) unaryInterceptor(ctx context.Context, req any, info *grpc.Unary
 		Method:    info.FullMethod,
 		Host:      host,
 	}
-	s.broadcast(event)
-	s.statBroadcast(event)
+	s.broadcast(ctx, event)
+	s.statBroadcast(ctx, event)
 	return handler(ctx, req)
 }
 
@@ -146,8 +146,8 @@ func (s *server) streamInterceptor(srv any, stream grpc.ServerStream, info *grpc
 		Method:    info.FullMethod,
 		Host:      host,
 	}
-	s.broadcast(event)
-	s.statBroadcast(event)
+	s.broadcast(ctx, event)
+	s.statBroadcast(ctx, event)
 	return handler(srv, stream)
 }
 
@@ -201,7 +201,7 @@ func (s *server) removeSubscriber(sub *subscriber) {
 	delete(s.subscribers, sub)
 }
 
-func (s *server) broadcast(ev *Event) {
+func (s *server) broadcast(ctx context.Context, ev *Event) {
 	s.mutex.Lock()
 	subs := make([]*subscriber, 0, len(s.subscribers))
 	for sub := range s.subscribers {
@@ -212,13 +212,9 @@ func (s *server) broadcast(ev *Event) {
 	var wg sync.WaitGroup
 
 	for _, sub := range subs {
-		wg.Add(1)
-
-		go func(sub *subscriber) {
-			defer wg.Done()
-
-			timer := time.NewTimer(100 * time.Millisecond)
-			defer timer.Stop()
+		wg.Go(func() {
+			tCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer cancel()
 
 			select {
 			case <-sub.done:
@@ -227,10 +223,10 @@ func (s *server) broadcast(ev *Event) {
 			case sub.events <- ev:
 				return
 
-			case <-timer.C:
+			case <-tCtx.Done():
 				return
 			}
-		}(sub)
+		})
 	}
 
 	wg.Wait()
@@ -248,7 +244,7 @@ func (s *server) removeStatSubscriber(sub *statSubscriber) {
 	delete(s.statSubscribers, sub)
 }
 
-func (s *server) statBroadcast(ev *Event) {
+func (s *server) statBroadcast(ctx context.Context, ev *Event) {
 	s.statMutex.Lock()
 	subs := make([]*statSubscriber, 0, len(s.subscribers))
 	for sub := range s.statSubscribers {
@@ -259,13 +255,9 @@ func (s *server) statBroadcast(ev *Event) {
 	var wg sync.WaitGroup
 
 	for _, sub := range subs {
-		wg.Add(1)
-
-		go func(sub *statSubscriber) {
-			defer wg.Done()
-
-			timer := time.NewTimer(100 * time.Millisecond)
-			defer timer.Stop()
+		wg.Go(func() {
+			tCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer cancel()
 
 			select {
 			case <-sub.done:
@@ -274,10 +266,10 @@ func (s *server) statBroadcast(ev *Event) {
 			case sub.events <- ev:
 				return
 
-			case <-timer.C:
+			case <-tCtx.Done():
 				return
 			}
-		}(sub)
+		})
 	}
 
 	wg.Wait()
