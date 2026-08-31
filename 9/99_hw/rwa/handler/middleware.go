@@ -30,14 +30,14 @@ func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		claims, err := h.Session.ParseToken(tokenString)
+		sessionID, err := h.Session.Parse(tokenString)
 		if err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
 		h.Storage.Mu.Lock()
-		session, ok := h.Storage.Sessions[claims.SessionID]
+		session, ok := h.Storage.Sessions[sessionID]
 		h.Storage.Mu.Unlock()
 
 		if !ok {

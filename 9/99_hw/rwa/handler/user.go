@@ -68,7 +68,7 @@ func (h *Handler) UserLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	token, err := h.Session.Create(user.ID)
+	token, err := h.createSession(user.ID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -159,7 +159,7 @@ func (h *Handler) UserRegister(w http.ResponseWriter, r *http.Request) {
 	h.Storage.Users[user.Email] = user
 	h.Storage.Mu.Unlock()
 
-	token, err := h.Session.Create(user.ID)
+	token, err := h.createSession(user.ID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -296,7 +296,7 @@ func (h *Handler) UserUpdate(w http.ResponseWriter, r *http.Request) {
 
 	h.Storage.Mu.Unlock()
 
-	token, err := h.Session.Create(user.ID)
+	token, err := h.createSession(user.ID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -319,4 +319,30 @@ func (h *Handler) UserUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+}
+
+func (h *Handler) createSession(userID string) (string, error) {
+	now := time.Now()
+
+	session := &model.Session{
+		ID:        utils.RandStringRunes(32),
+		UserID:    userID,
+		CreatedAt: now,
+		ExpiresAt: now.Add(24 * time.Hour),
+	}
+
+	h.Storage.Mu.Lock()
+	h.Storage.Sessions[session.ID] = session
+	h.Storage.Mu.Unlock()
+
+	token, err := h.Session.Create(session.ID)
+	if err != nil {
+		h.Storage.Mu.Lock()
+		delete(h.Storage.Sessions, session.ID)
+		h.Storage.Mu.Unlock()
+
+		return "", err
+	}
+
+	return token, nil
 }

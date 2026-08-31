@@ -1,11 +1,14 @@
 package handler
 
 import (
-	"rwa/session"
 	"rwa/storage"
 )
 
+type SessionManager interface {
+	Create(sessionID string) (string, error)
+	Parse(token string) (string, error)
+}
 type Handler struct {
 	Storage *storage.Storage
-	Session *session.Manager
+	Session SessionManager
 }

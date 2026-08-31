@@ -11,7 +11,7 @@ import (
 func GetApp() http.Handler {
 
 	newStorage := storage.NewStorage()
-	newSessionManager := session.NewSessionManager(newStorage, []byte("key"), 24*time.Hour)
+	newSessionManager := session.NewSessionManager([]byte("key"), 24*time.Hour)
 
 	h := &handler.Handler{
 		Storage: newStorage,

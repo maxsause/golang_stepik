@@ -1,11 +1,7 @@
 package session
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
-	"rwa/model"
-	"rwa/storage"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -17,40 +13,25 @@ type Claims struct {
 }
 
 type Manager struct {
-	storage *storage.Storage
-	secret  []byte
-	ttl     time.Duration
+	secret []byte
+	ttl    time.Duration
 }
 
-func NewSessionManager(storage *storage.Storage, secret []byte, ttl time.Duration) *Manager {
+func NewSessionManager(secret []byte, ttl time.Duration) *Manager {
 	return &Manager{
-		storage: storage,
-		secret:  secret,
-		ttl:     ttl,
+		secret: secret,
+		ttl:    ttl,
 	}
 }
 
-func (s *Manager) Create(userID string) (string, error) {
-	sessionID, err := generateSessionID()
-	if err != nil {
-		return "", fmt.Errorf("generate session id: %w", err)
-	}
-
+func (m *Manager) Create(sessionID string) (string, error) {
 	now := time.Now()
-	expiresAt := now.Add(s.ttl)
-
-	session := &model.Session{
-		ID:        sessionID,
-		UserID:    userID,
-		CreatedAt: now,
-		ExpiresAt: expiresAt,
-	}
 
 	claims := Claims{
 		SessionID: sessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			ExpiresAt: jwt.NewNumericDate(now.Add(m.ttl)),
 		},
 	}
 
@@ -59,19 +40,15 @@ func (s *Manager) Create(userID string) (string, error) {
 		claims,
 	)
 
-	tokenString, err := token.SignedString(s.secret)
+	tokenString, err := token.SignedString(m.secret)
 	if err != nil {
 		return "", fmt.Errorf("sign token: %w", err)
 	}
 
-	s.storage.Mu.Lock()
-	s.storage.Sessions[sessionID] = session
-	s.storage.Mu.Unlock()
-
 	return tokenString, nil
 }
 
-func (s *Manager) ParseToken(tokenString string) (*Claims, error) {
+func (m *Manager) Parse(tokenString string) (string, error) {
 	token, err := jwt.ParseWithClaims(
 		tokenString,
 		&Claims{},
@@ -83,32 +60,21 @@ func (s *Manager) ParseToken(tokenString string) (*Claims, error) {
 				)
 			}
 
-			return s.secret, nil
+			return m.secret, nil
 		},
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	if !token.Valid {
-		return nil, fmt.Errorf("invalid token")
-	}
-
-	claims, ok := token.Claims.(*Claims)
-	if !ok || claims.SessionID == "" {
-		return nil, fmt.Errorf("invalid claims")
-	}
-
-	return claims, nil
-}
-
-func generateSessionID() (string, error) {
-	buf := make([]byte, 16)
-
-	_, err := rand.Read(buf)
 	if err != nil {
 		return "", err
 	}
 
-	return hex.EncodeToString(buf), nil
+	if !token.Valid {
+		return "", fmt.Errorf("invalid token")
+	}
+
+	claims, ok := token.Claims.(*Claims)
+	if !ok || claims.SessionID == "" {
+		return "", fmt.Errorf("invalid claims")
+	}
+
+	return claims.SessionID, nil
 }
