@@ -1,4 +1,4 @@
-package main
+package handler
 
 import (
 	"context"
@@ -10,7 +10,7 @@ type contextKey string
 
 const sessionContextKey contextKey = "session"
 
-func (h *handler) AuthMiddleware(next http.Handler) http.Handler {
+func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		if auth == "" {
@@ -30,15 +30,15 @@ func (h *handler) AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		claims, err := h.session.ParseToken(tokenString)
+		claims, err := h.Session.ParseToken(tokenString)
 		if err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		h.storage.mu.Lock()
-		session, ok := h.storage.sessions[claims.SessionID]
-		h.storage.mu.Unlock()
+		h.Storage.Mu.Lock()
+		session, ok := h.Storage.Sessions[claims.SessionID]
+		h.Storage.Mu.Unlock()
 
 		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)

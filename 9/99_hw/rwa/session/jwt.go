@@ -1,41 +1,36 @@
-package main
+package session
 
 import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"rwa/model"
+	"rwa/storage"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-type Session struct {
-	ID        string
-	UserID    string
-	CreatedAt time.Time
-	ExpiresAt time.Time
-}
-
-type SessionClaims struct {
+type Claims struct {
 	SessionID string `json:"session_id"`
 	jwt.RegisteredClaims
 }
 
-type SessionManager struct {
-	storage *Storage
+type Manager struct {
+	storage *storage.Storage
 	secret  []byte
 	ttl     time.Duration
 }
 
-func NewSessionManager(storage *Storage, secret []byte, ttl time.Duration) *SessionManager {
-	return &SessionManager{
+func NewSessionManager(storage *storage.Storage, secret []byte, ttl time.Duration) *Manager {
+	return &Manager{
 		storage: storage,
 		secret:  secret,
 		ttl:     ttl,
 	}
 }
 
-func (s *SessionManager) Create(userID string) (string, error) {
+func (s *Manager) Create(userID string) (string, error) {
 	sessionID, err := generateSessionID()
 	if err != nil {
 		return "", fmt.Errorf("generate session id: %w", err)
@@ -44,14 +39,14 @@ func (s *SessionManager) Create(userID string) (string, error) {
 	now := time.Now()
 	expiresAt := now.Add(s.ttl)
 
-	session := &Session{
+	session := &model.Session{
 		ID:        sessionID,
 		UserID:    userID,
 		CreatedAt: now,
 		ExpiresAt: expiresAt,
 	}
 
-	claims := SessionClaims{
+	claims := Claims{
 		SessionID: sessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -69,17 +64,17 @@ func (s *SessionManager) Create(userID string) (string, error) {
 		return "", fmt.Errorf("sign token: %w", err)
 	}
 
-	s.storage.mu.Lock()
-	s.storage.sessions[sessionID] = session
-	s.storage.mu.Unlock()
+	s.storage.Mu.Lock()
+	s.storage.Sessions[sessionID] = session
+	s.storage.Mu.Unlock()
 
 	return tokenString, nil
 }
 
-func (s *SessionManager) ParseToken(tokenString string) (*SessionClaims, error) {
+func (s *Manager) ParseToken(tokenString string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(
 		tokenString,
-		&SessionClaims{},
+		&Claims{},
 		func(token *jwt.Token) (interface{}, error) {
 			if token.Method != jwt.SigningMethodHS256 {
 				return nil, fmt.Errorf(
@@ -99,7 +94,7 @@ func (s *SessionManager) ParseToken(tokenString string) (*SessionClaims, error) 
 		return nil, fmt.Errorf("invalid token")
 	}
 
-	claims, ok := token.Claims.(*SessionClaims)
+	claims, ok := token.Claims.(*Claims)
 	if !ok || claims.SessionID == "" {
 		return nil, fmt.Errorf("invalid claims")
 	}

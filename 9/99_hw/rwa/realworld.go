@@ -2,17 +2,20 @@ package main
 
 import (
 	"net/http"
+	"rwa/handler"
+	"rwa/session"
+	"rwa/storage"
 	"time"
 )
 
 func GetApp() http.Handler {
 
-	storage := NewStorage()
-	session := NewSessionManager(storage, []byte("key"), 24*time.Hour)
+	newStorage := storage.NewStorage()
+	newSessionManager := session.NewSessionManager(newStorage, []byte("key"), 24*time.Hour)
 
-	h := &handler{
-		storage: storage,
-		session: session,
+	h := &handler.Handler{
+		Storage: newStorage,
+		Session: newSessionManager,
 	}
 
 	mux := http.NewServeMux()
