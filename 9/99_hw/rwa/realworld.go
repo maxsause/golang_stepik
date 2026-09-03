@@ -2,9 +2,9 @@ package main
 
 import (
 	"net/http"
-	"rwa/handler"
-	"rwa/session"
-	"rwa/storage"
+	"rwa/internal/handler"
+	"rwa/internal/session"
+	"rwa/internal/storage"
 	"time"
 )
 

@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"rwa/storage"
+	"rwa/internal/storage"
 )
 
 type SessionManager interface {

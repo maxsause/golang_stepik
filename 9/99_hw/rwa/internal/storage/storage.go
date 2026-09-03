@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"rwa/model"
+	"rwa/internal/model"
 	"sync"
 )
 

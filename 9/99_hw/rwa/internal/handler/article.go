@@ -2,9 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
-	"rwa/model"
-	"rwa/utils"
+	"rwa/internal/model"
+	"rwa/internal/utils"
+	"slices"
 	"sort"
 	"time"
 )
@@ -52,36 +54,20 @@ func (h *Handler) ArticlesGetRecent(w http.ResponseWriter, r *http.Request) {
 	tagFilter := r.URL.Query().Get("tag")
 
 	h.Storage.Mu.Lock()
-	articles := make([]*model.Article, 0, len(h.Storage.Article))
-	for _, article := range h.Storage.Article {
-		articles = append(articles, article)
-	}
-
-	users := make([]*model.User, 0, len(h.Storage.Users))
-	for _, user := range h.Storage.Users {
-		users = append(users, user)
-	}
+	articles := maps.Clone(h.Storage.Article)
+	users := maps.Clone(h.Storage.Users)
 	h.Storage.Mu.Unlock()
 
-	sort.Slice(articles, func(i, j int) bool {
-		return articles[i].CreatedAt.Before(articles[j].CreatedAt)
-	})
-
-	response := ArticlesResponse{
-		Articles: make([]ArticleResponse, 0),
+	usersByID := make(map[string]*model.User, len(users))
+	for _, user := range users {
+		usersByID[user.ID] = user
 	}
 
+	filteredArticles := make([]*model.Article, 0, len(articles))
+
 	for _, article := range articles {
-		var author *model.User
-
-		for _, user := range users {
-			if user.ID == article.AuthorID {
-				author = user
-				break
-			}
-		}
-
-		if author == nil {
+		author, ok := usersByID[article.AuthorID]
+		if !ok {
 			continue
 		}
 
@@ -89,20 +75,23 @@ func (h *Handler) ArticlesGetRecent(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if tagFilter != "" {
-			found := false
-
-			for _, tag := range article.TagList {
-				if tag == tagFilter {
-					found = true
-					break
-				}
-			}
-
-			if !found {
-				continue
-			}
+		if tagFilter != "" && !slices.Contains(article.TagList, tagFilter) {
+			continue
 		}
+
+		filteredArticles = append(filteredArticles, article)
+	}
+
+	sort.Slice(filteredArticles, func(i, j int) bool {
+		return filteredArticles[i].CreatedAt.Before(filteredArticles[j].CreatedAt)
+	})
+
+	response := ArticlesResponse{
+		Articles: make([]ArticleResponse, 0),
+	}
+
+	for _, article := range filteredArticles {
+		author := usersByID[article.AuthorID]
 
 		response.Articles = append(response.Articles, ArticleResponse{
 			Slug:        article.Slug,
@@ -112,7 +101,6 @@ func (h *Handler) ArticlesGetRecent(w http.ResponseWriter, r *http.Request) {
 			TagList:     article.TagList,
 			CreatedAt:   article.CreatedAt,
 			UpdatedAt:   article.UpdatedAt,
-
 			Author: ArticleAuthorResponse{
 				Username: author.Username,
 				Bio:      author.Bio,
@@ -194,7 +182,6 @@ func (h *Handler) ArticlesCreate(w http.ResponseWriter, r *http.Request) {
 			TagList:     article.TagList,
 			CreatedAt:   article.CreatedAt,
 			UpdatedAt:   article.UpdatedAt,
-
 			Author: ArticleAuthorResponse{
 				Username: author.Username,
 				Bio:      author.Bio,

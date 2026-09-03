@@ -3,8 +3,8 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
-	"rwa/model"
-	"rwa/utils"
+	"rwa/internal/model"
+	"rwa/internal/utils"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
