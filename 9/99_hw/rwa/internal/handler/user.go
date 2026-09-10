@@ -56,9 +56,9 @@ func (h *Handler) UserLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.Storage.Mu.Lock()
-	user, ok := h.Storage.Users[req.User.Email]
-	h.Storage.Mu.Unlock()
+	h.Users.Begin()
+	user, ok := h.Users.Get(req.User.Email)
+	h.Users.End()
 	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -98,42 +98,29 @@ func (h *Handler) UserLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.Storage.Mu.Lock()
-	delete(h.Storage.Sessions, session.ID)
-	h.Storage.Mu.Unlock()
+	h.Sessions.Begin()
+	h.Sessions.Delete(session.ID)
+	h.Sessions.End()
 
 	w.WriteHeader(http.StatusOK)
 }
 
 func (h *Handler) UserRegister(w http.ResponseWriter, r *http.Request) {
 	var req UserRegisterRequest
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	if req.User.Email == "" || req.User.Username == "" || req.User.Password == "" {
-		http.Error(w, "Email, username and password are required", http.StatusUnprocessableEntity)
+		http.Error(
+			w,
+			"Email, username and password are required",
+			http.StatusUnprocessableEntity,
+		)
 		return
 	}
-
-	h.Storage.Mu.Lock()
-	if _, exists := h.Storage.Users[req.User.Email]; exists {
-		h.Storage.Mu.Unlock()
-
-		http.Error(w, "User already exists", http.StatusUnprocessableEntity)
-		return
-	}
-
-	for _, user := range h.Storage.Users {
-		if user.Username == req.User.Username {
-			h.Storage.Mu.Unlock()
-
-			http.Error(w, "User already exists", http.StatusUnprocessableEntity)
-			return
-		}
-	}
-	h.Storage.Mu.Unlock()
 
 	passwordHash, err := bcrypt.GenerateFromPassword(
 		[]byte(req.User.Password),
@@ -146,7 +133,7 @@ func (h *Handler) UserRegister(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 
-	user := &model.User{
+	user := model.User{
 		ID:           utils.RandStringRunes(16),
 		Email:        req.User.Email,
 		Username:     req.User.Username,
@@ -155,9 +142,37 @@ func (h *Handler) UserRegister(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:    now,
 	}
 
-	h.Storage.Mu.Lock()
-	h.Storage.Users[user.Email] = user
-	h.Storage.Mu.Unlock()
+	h.Users.Begin()
+
+	if _, exists := h.Users.Get(req.User.Email); exists {
+		h.Users.End()
+
+		http.Error(
+			w,
+			"User already exists",
+			http.StatusUnprocessableEntity,
+		)
+		return
+	}
+
+	users := h.Users.List()
+
+	for _, existingUser := range users {
+		if existingUser.Username == req.User.Username {
+			h.Users.End()
+
+			http.Error(
+				w,
+				"User already exists",
+				http.StatusUnprocessableEntity,
+			)
+			return
+		}
+	}
+
+	h.Users.Create(user.Email, user)
+
+	h.Users.End()
 
 	token, err := h.createSession(user.ID)
 	if err != nil {
@@ -165,8 +180,6 @@ func (h *Handler) UserRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
 	response := UsersResponse{
 		User: UserResponse{
 			Email:     user.Email,
@@ -176,8 +189,11 @@ func (h *Handler) UserRegister(w http.ResponseWriter, r *http.Request) {
 			Token:     token,
 		},
 	}
-	if err = json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		return
 	}
 }
@@ -189,17 +205,22 @@ func (h *Handler) UserGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.Storage.Mu.Lock()
-	var user *model.User
-	for _, u := range h.Storage.Users {
+	h.Users.Begin()
+
+	var user model.User
+	found := false
+
+	for _, u := range h.Users.List() {
 		if u.ID == session.UserID {
 			user = u
+			found = true
 			break
 		}
 	}
-	h.Storage.Mu.Unlock()
 
-	if user == nil {
+	h.Users.End()
+
+	if !found {
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
@@ -249,18 +270,24 @@ func (h *Handler) UserUpdate(w http.ResponseWriter, r *http.Request) {
 		passwordHash = hash
 	}
 
-	h.Storage.Mu.Lock()
-	var user *model.User
+	h.Users.Begin()
 
-	for _, u := range h.Storage.Users {
+	users := h.Users.List()
+
+	var user model.User
+	found := false
+
+	for _, u := range users {
 		if u.ID == session.UserID {
 			user = u
+			found = true
 			break
 		}
 	}
 
-	if user == nil {
-		h.Storage.Mu.Unlock()
+	if !found {
+		h.Users.End()
+
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
@@ -289,12 +316,10 @@ func (h *Handler) UserUpdate(w http.ResponseWriter, r *http.Request) {
 
 	user.UpdatedAt = time.Now()
 
-	if oldEmail != user.Email {
-		delete(h.Storage.Users, oldEmail)
-		h.Storage.Users[user.Email] = user
-	}
+	h.Users.Delete(oldEmail)
+	h.Users.Create(user.Email, user)
 
-	h.Storage.Mu.Unlock()
+	h.Users.End()
 
 	token, err := h.createSession(user.ID)
 	if err != nil {
@@ -324,22 +349,22 @@ func (h *Handler) UserUpdate(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) createSession(userID string) (string, error) {
 	now := time.Now()
 
-	session := &model.Session{
+	session := model.Session{
 		ID:        utils.RandStringRunes(32),
 		UserID:    userID,
 		CreatedAt: now,
 		ExpiresAt: now.Add(24 * time.Hour),
 	}
 
-	h.Storage.Mu.Lock()
-	h.Storage.Sessions[session.ID] = session
-	h.Storage.Mu.Unlock()
+	h.Sessions.Begin()
+	h.Sessions.Create(session.ID, session)
+	h.Sessions.End()
 
 	token, err := h.Session.Create(session.ID)
 	if err != nil {
-		h.Storage.Mu.Lock()
-		delete(h.Storage.Sessions, session.ID)
-		h.Storage.Mu.Unlock()
+		h.Sessions.Begin()
+		h.Sessions.Delete(session.ID)
+		h.Sessions.End()
 
 		return "", err
 	}

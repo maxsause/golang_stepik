@@ -36,9 +36,9 @@ func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		h.Storage.Mu.Lock()
-		session, ok := h.Storage.Sessions[sessionID]
-		h.Storage.Mu.Unlock()
+		h.Sessions.Begin()
+		session, ok := h.Sessions.Get(sessionID)
+		h.Sessions.End()
 
 		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -48,7 +48,7 @@ func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(
 			r.Context(),
 			sessionContextKey,
-			session,
+			&session,
 		)
 
 		next.ServeHTTP(w, r.WithContext(ctx))

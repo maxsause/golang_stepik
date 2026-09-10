@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"rwa/internal/handler"
+	"rwa/internal/model"
 	"rwa/internal/session"
 	"rwa/internal/storage"
 	"time"
@@ -10,12 +11,20 @@ import (
 
 func GetApp() http.Handler {
 
-	newStorage := storage.NewStorage()
-	newSessionManager := session.NewSessionManager([]byte("key"), 24*time.Hour)
+	userStorage := storage.NewMemoryStorage[model.User]()
+	sessionStorage := storage.NewMemoryStorage[model.Session]()
+	articleStorage := storage.NewMemoryStorage[model.Article]()
+
+	sessionManager := session.NewSessionManager(
+		[]byte("key"),
+		24*time.Hour,
+	)
 
 	h := &handler.Handler{
-		Storage: newStorage,
-		Session: newSessionManager,
+		Users:    userStorage,
+		Sessions: sessionStorage,
+		Articles: articleStorage,
+		Session:  sessionManager,
 	}
 
 	mux := http.NewServeMux()

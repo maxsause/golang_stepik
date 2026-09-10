@@ -2,7 +2,6 @@ package handler
 
 import (
 	"encoding/json"
-	"maps"
 	"net/http"
 	"rwa/internal/model"
 	"rwa/internal/utils"
@@ -53,17 +52,21 @@ func (h *Handler) ArticlesGetRecent(w http.ResponseWriter, r *http.Request) {
 	authorFilter := r.URL.Query().Get("author")
 	tagFilter := r.URL.Query().Get("tag")
 
-	h.Storage.Mu.Lock()
-	articles := maps.Clone(h.Storage.Article)
-	users := maps.Clone(h.Storage.Users)
-	h.Storage.Mu.Unlock()
+	h.Articles.Begin()
+	articles := h.Articles.List()
+	h.Articles.End()
 
-	usersByID := make(map[string]*model.User, len(users))
+	h.Users.Begin()
+	users := h.Users.List()
+	h.Users.End()
+
+	usersByID := make(map[string]model.User, len(users))
+
 	for _, user := range users {
 		usersByID[user.ID] = user
 	}
 
-	filteredArticles := make([]*model.Article, 0, len(articles))
+	filteredArticles := make([]model.Article, 0, len(articles))
 
 	for _, article := range articles {
 		author, ok := usersByID[article.AuthorID]
@@ -83,11 +86,13 @@ func (h *Handler) ArticlesGetRecent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sort.Slice(filteredArticles, func(i, j int) bool {
-		return filteredArticles[i].CreatedAt.Before(filteredArticles[j].CreatedAt)
+		return filteredArticles[i].CreatedAt.Before(
+			filteredArticles[j].CreatedAt,
+		)
 	})
 
 	response := ArticlesResponse{
-		Articles: make([]ArticleResponse, 0),
+		Articles: make([]ArticleResponse, 0, len(filteredArticles)),
 	}
 
 	for _, article := range filteredArticles {
@@ -120,43 +125,57 @@ func (h *Handler) ArticlesGetRecent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ArticlesCreate(w http.ResponseWriter, r *http.Request) {
-	s, ok := r.Context().Value(sessionContextKey).(*model.Session)
+	session, ok := r.Context().Value(sessionContextKey).(*model.Session)
 	if !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	var req ArticleCreateRequest
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if req.Article.Title == "" || req.Article.Description == "" || req.Article.Body == "" {
-		http.Error(w, "title, description and body are required", http.StatusUnprocessableEntity)
+	if req.Article.Title == "" ||
+		req.Article.Description == "" ||
+		req.Article.Body == "" {
+
+		http.Error(
+			w,
+			"title, description and body are required",
+			http.StatusUnprocessableEntity,
+		)
 		return
 	}
 
-	h.Storage.Mu.Lock()
-	var author *model.User
-	for _, user := range h.Storage.Users {
-		if user.ID == s.UserID {
+	h.Users.Begin()
+
+	users := h.Users.List()
+
+	var author model.User
+	found := false
+
+	for _, user := range users {
+		if user.ID == session.UserID {
 			author = user
+			found = true
 			break
 		}
 	}
-	h.Storage.Mu.Unlock()
 
-	if author == nil {
+	h.Users.End()
+
+	if !found {
 		http.Error(w, "User not found", http.StatusUnauthorized)
 		return
 	}
 
 	now := time.Now()
-
 	slug := utils.RandStringRunes(16)
 
-	article := &model.Article{
+	article := model.Article{
 		Slug:        slug,
 		Title:       req.Article.Title,
 		Description: req.Article.Description,
@@ -167,12 +186,10 @@ func (h *Handler) ArticlesCreate(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:   now,
 	}
 
-	h.Storage.Mu.Lock()
-	h.Storage.Article[article.Slug] = article
-	h.Storage.Mu.Unlock()
+	h.Articles.Begin()
+	h.Articles.Create(article.Slug, article)
+	h.Articles.End()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
 	response := SingleArticleResponse{
 		Article: ArticleResponse{
 			Slug:        article.Slug,
@@ -189,6 +206,10 @@ func (h *Handler) ArticlesCreate(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
